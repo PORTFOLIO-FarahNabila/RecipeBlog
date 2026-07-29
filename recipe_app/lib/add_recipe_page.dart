@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -7,7 +8,14 @@ import 'recipe_service.dart';
 import 'recipe_widgets.dart';
 
 class AddRecipePage extends StatefulWidget {
-  const AddRecipePage({super.key});
+  /// Pass an existing recipe to edit it in place. Leave null to add a new
+  /// recipe. Only the recipe's original creator will be able to reach this
+  /// page in edit mode (see RecipeDetailPage).
+  final Recipe? existingRecipe;
+
+  const AddRecipePage({super.key, this.existingRecipe});
+
+  bool get isEditing => existingRecipe != null;
 
   @override
   State<AddRecipePage> createState() => _AddRecipePageState();
@@ -30,6 +38,32 @@ class _AddRecipePageState extends State<AddRecipePage> {
   String? _pickedImageName;
   bool _isPickingImage = false;
 
+  // Existing ingredient names across all recipes, used to suggest matches
+  // as the user types instead of them having to retype an ingredient that
+  // already exists.
+  List<String> _knownIngredientNames = [];
+  StreamSubscription<List<String>>? _ingredientNamesSub;
+
+  @override
+  void initState() {
+    super.initState();
+
+    final existing = widget.existingRecipe;
+    if (existing != null) {
+      _titleController.text = existing.title;
+      _descriptionController.text = existing.description;
+      _prepController.text = existing.prepTime == '-' ? '' : existing.prepTime;
+      _cookController.text = existing.cookTime == '-' ? '' : existing.cookTime;
+      _servingsController.text =
+          existing.servings == '-' ? '' : existing.servings;
+      _ingredients.addAll(existing.ingredients);
+    }
+
+    _ingredientNamesSub = RecipeService.ingredientNamesStream().listen((names) {
+      if (mounted) setState(() => _knownIngredientNames = names);
+    });
+  }
+
   @override
   void dispose() {
     _titleController.dispose();
@@ -38,15 +72,33 @@ class _AddRecipePageState extends State<AddRecipePage> {
     _cookController.dispose();
     _servingsController.dispose();
     _ingredientController.dispose();
+    _ingredientNamesSub?.cancel();
     super.dispose();
   }
 
-  void _addIngredient() {
-    final value = _ingredientController.text.trim();
+  List<String> get _ingredientSuggestions {
+    final query = _ingredientController.text.trim().toLowerCase();
+    if (query.isEmpty) return const [];
+    return _knownIngredientNames.where((name) {
+      final matches = name.toLowerCase().contains(query);
+      final alreadyAdded = _ingredients.any(
+        (existing) =>
+            RecipeService.normalizeKey(existing) ==
+            RecipeService.normalizeKey(name),
+      );
+      return matches && !alreadyAdded;
+    }).take(5).toList();
+  }
+
+  void _addIngredient([String? suggested]) {
+    final value = suggested ?? _ingredientController.text.trim();
     if (value.isEmpty) return;
 
-    final isDuplicate = _ingredients
-        .any((existing) => RecipeService.normalizeKey(existing) == RecipeService.normalizeKey(value));
+    final isDuplicate = _ingredients.any(
+      (existing) =>
+          RecipeService.normalizeKey(existing) ==
+          RecipeService.normalizeKey(value),
+    );
 
     if (isDuplicate) {
       setState(() {
@@ -73,8 +125,13 @@ class _AddRecipePageState extends State<AddRecipePage> {
     try {
       final picked = await ImagePicker().pickImage(
         source: ImageSource.gallery,
-        imageQuality: 85,
-        maxWidth: 1600,
+        // Keeping these numbers modest matters a lot for upload speed: a
+        // full-resolution phone photo can be several MB, which is what
+        // makes "add recipe with a photo" feel slow. Downscaling and
+        // recompressing here keeps the upload to a few hundred KB without
+        // a visible quality loss for a recipe thumbnail/hero image.
+        imageQuality: 70,
+        maxWidth: 1080,
       );
       if (picked == null) return;
 
@@ -113,7 +170,7 @@ class _AddRecipePageState extends State<AddRecipePage> {
     setState(() => _isSubmitting = true);
 
     try {
-      String? imageUrl;
+      String? imageUrl = widget.existingRecipe?.imageUrl;
       if (_pickedImageBytes != null) {
         imageUrl = await RecipeService.uploadRecipeImage(
           _pickedImageBytes!,
@@ -121,31 +178,53 @@ class _AddRecipePageState extends State<AddRecipePage> {
         );
       }
 
-      await RecipeService.addRecipe(
-        title: _titleController.text.trim(),
-        description: _descriptionController.text.trim(),
-        ingredients: _ingredients,
-        prepTime: _prepController.text.trim().isEmpty
-            ? '-'
-            : _prepController.text.trim(),
-        cookTime: _cookController.text.trim().isEmpty
-            ? '-'
-            : _cookController.text.trim(),
-        servings: _servingsController.text.trim().isEmpty
-            ? '-'
-            : _servingsController.text.trim(),
-        imageUrl: imageUrl,
-      );
+      final prepTime =
+          _prepController.text.trim().isEmpty ? '-' : _prepController.text.trim();
+      final cookTime =
+          _cookController.text.trim().isEmpty ? '-' : _cookController.text.trim();
+      final servings = _servingsController.text.trim().isEmpty
+          ? '-'
+          : _servingsController.text.trim();
+
+      if (widget.isEditing) {
+        await RecipeService.updateRecipe(
+          id: widget.existingRecipe!.id,
+          title: _titleController.text.trim(),
+          description: _descriptionController.text.trim(),
+          ingredients: _ingredients,
+          prepTime: prepTime,
+          cookTime: cookTime,
+          servings: servings,
+          imageUrl: imageUrl,
+        );
+      } else {
+        await RecipeService.addRecipe(
+          title: _titleController.text.trim(),
+          description: _descriptionController.text.trim(),
+          ingredients: _ingredients,
+          prepTime: prepTime,
+          cookTime: cookTime,
+          servings: servings,
+          imageUrl: imageUrl,
+        );
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           behavior: SnackBarBehavior.floating,
           backgroundColor: RecipeTheme.primary,
-          content: Text('"${_titleController.text.trim()}" added!'),
+          content: Text(
+            widget.isEditing
+                ? '"${_titleController.text.trim()}" updated!'
+                : '"${_titleController.text.trim()}" added!',
+          ),
         ),
       );
-      Navigator.pop(context);
+      // Both the add and edit flows can be reached from a couple of levels
+      // deep in the navigation stack, so jump straight back to Home, whose
+      // recipe list is Firestore-stream-driven and will reflect the change.
+      Navigator.popUntil(context, (route) => route.isFirst);
     } catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -166,10 +245,12 @@ class _AddRecipePageState extends State<AddRecipePage> {
 
   @override
   Widget build(BuildContext context) {
+    final suggestions = _ingredientSuggestions;
+
     return Scaffold(
       backgroundColor: RecipeTheme.background,
       appBar: AppBar(
-        title: const Text('Add Recipe'),
+        title: Text(widget.isEditing ? 'Edit Recipe' : 'Add Recipe'),
         centerTitle: true,
         elevation: 0,
         backgroundColor: RecipeTheme.background,
@@ -246,16 +327,24 @@ class _AddRecipePageState extends State<AddRecipePage> {
                     width: double.infinity,
                     height: 180,
                     color: RecipeTheme.primary.withOpacity(0.08),
-                    child: _pickedImageBytes == null
-                        ? Icon(
-                            Icons.add_photo_alternate_outlined,
-                            size: 40,
-                            color: RecipeTheme.primary.withOpacity(0.4),
-                          )
-                        : Image.memory(
-                            _pickedImageBytes!,
-                            fit: BoxFit.cover,
-                          ),
+                    child: _pickedImageBytes != null
+                        ? Image.memory(_pickedImageBytes!, fit: BoxFit.cover)
+                        : (widget.existingRecipe?.imageUrl != null &&
+                                widget.existingRecipe!.imageUrl!.isNotEmpty)
+                            ? Image.network(
+                                widget.existingRecipe!.imageUrl!,
+                                fit: BoxFit.cover,
+                                errorBuilder: (context, error, stackTrace) => Icon(
+                                  Icons.add_photo_alternate_outlined,
+                                  size: 40,
+                                  color: RecipeTheme.primary.withOpacity(0.4),
+                                ),
+                              )
+                            : Icon(
+                                Icons.add_photo_alternate_outlined,
+                                size: 40,
+                                color: RecipeTheme.primary.withOpacity(0.4),
+                              ),
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -271,7 +360,8 @@ class _AddRecipePageState extends State<AddRecipePage> {
                             )
                           : const Icon(Icons.photo_library_outlined),
                       label: Text(
-                        _pickedImageBytes == null
+                        (_pickedImageBytes == null &&
+                                widget.existingRecipe?.imageUrl == null)
                             ? 'Choose Photo'
                             : 'Change Photo',
                       ),
@@ -311,12 +401,13 @@ class _AddRecipePageState extends State<AddRecipePage> {
                           'Ingredient',
                           hint: 'e.g. brown sugar',
                         ).copyWith(errorText: _ingredientError),
+                        onChanged: (_) => setState(() {}),
                         onSubmitted: (_) => _addIngredient(),
                       ),
                     ),
                     const SizedBox(width: 10),
                     ElevatedButton(
-                      onPressed: _addIngredient,
+                      onPressed: () => _addIngredient(),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: RecipeTheme.primary,
                         foregroundColor: Colors.white,
@@ -329,6 +420,31 @@ class _AddRecipePageState extends State<AddRecipePage> {
                     ),
                   ],
                 ),
+                // Suggestions from the shared ingredients list, filtered as
+                // the user types. Tapping one adds it directly; the user is
+                // always free to ignore these and add their own instead.
+                if (suggestions.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: suggestions
+                        .map(
+                          (name) => ActionChip(
+                            avatar: const Icon(
+                              Icons.add_circle_outline_rounded,
+                              size: 16,
+                              color: RecipeTheme.primary,
+                            ),
+                            label: Text(name),
+                            backgroundColor: Colors.white,
+                            side: const BorderSide(color: RecipeTheme.cardBorder),
+                            onPressed: () => _addIngredient(name),
+                          ),
+                        )
+                        .toList(),
+                  ),
+                ],
                 const SizedBox(height: 14),
                 if (_ingredients.isEmpty)
                   Text(
@@ -374,7 +490,11 @@ class _AddRecipePageState extends State<AddRecipePage> {
                             ),
                           )
                         : const Icon(Icons.check_rounded),
-                    label: Text(_isSubmitting ? 'Saving...' : 'Save Recipe'),
+                    label: Text(
+                      _isSubmitting
+                          ? 'Saving...'
+                          : (widget.isEditing ? 'Save Changes' : 'Save Recipe'),
+                    ),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: RecipeTheme.primary,
                       foregroundColor: Colors.white,

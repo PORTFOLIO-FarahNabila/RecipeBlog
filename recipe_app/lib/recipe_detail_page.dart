@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'add_recipe_page.dart';
 import 'comments_section.dart';
 import 'recipe_service.dart';
 import 'recipe_widgets.dart';
@@ -62,6 +63,20 @@ class RecipeDetailPage extends StatelessWidget {
             (route) => false,
           ),
         ),
+        actions: [
+          // Only the person who added this recipe sees the edit button.
+          if (recipe.isOwnedByCurrentUser)
+            IconButton(
+              icon: const Icon(Icons.edit_rounded),
+              tooltip: 'Edit Recipe',
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => AddRecipePage(existingRecipe: recipe),
+                ),
+              ),
+            ),
+        ],
       ),
       body: Center(
         child: Container(

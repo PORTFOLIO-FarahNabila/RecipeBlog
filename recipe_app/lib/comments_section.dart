@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import 'comment_service.dart';
@@ -19,6 +20,15 @@ class _CommentsSectionState extends State<CommentsSection> {
   bool _isSubmitting = false;
 
   @override
+  void initState() {
+    super.initState();
+    // Email is tied to the signed-in account rather than freely typed, so
+    // that "who wrote this comment" always matches the authenticated user
+    // and can't be spoofed by typing someone else's email address.
+    _emailController.text = FirebaseAuth.instance.currentUser?.email ?? '';
+  }
+
+  @override
   void dispose() {
     _emailController.dispose();
     _messageController.dispose();
@@ -26,9 +36,9 @@ class _CommentsSectionState extends State<CommentsSection> {
   }
 
   void _startEdit(Comment comment) {
+    if (!comment.isOwnedByCurrentUser) return;
     setState(() {
       _editingCommentId = comment.id;
-      _emailController.text = comment.email;
       _messageController.text = comment.message;
     });
   }
@@ -37,7 +47,6 @@ class _CommentsSectionState extends State<CommentsSection> {
     setState(() {
       _editingCommentId = null;
       _errorMessage = null;
-      _emailController.clear();
       _messageController.clear();
     });
   }
@@ -48,7 +57,7 @@ class _CommentsSectionState extends State<CommentsSection> {
 
     if (email.isEmpty || message.isEmpty) {
       setState(() {
-        _errorMessage = 'Email and message are required';
+        _errorMessage = 'You must be signed in, and a message is required';
       });
       return;
     }
@@ -93,9 +102,10 @@ class _CommentsSectionState extends State<CommentsSection> {
     }
   }
 
-  Future<void> _deleteComment(String id) async {
+  Future<void> _deleteComment(Comment comment) async {
+    if (!comment.isOwnedByCurrentUser) return;
     try {
-      await CommentService.deleteComment(widget.recipeName, id);
+      await CommentService.deleteComment(widget.recipeName, comment.id);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Comment deleted')),
@@ -124,10 +134,11 @@ class _CommentsSectionState extends State<CommentsSection> {
           // Comment form
           TextField(
             controller: _emailController,
+            readOnly: true,
             decoration: const InputDecoration(
               border: OutlineInputBorder(),
               labelText: 'Email',
-              hintText: 'your@email.com',
+              helperText: 'Your signed-in account',
             ),
           ),
           const SizedBox(height: 12),
@@ -207,6 +218,8 @@ class _CommentsSectionState extends State<CommentsSection> {
                 itemCount: comments.length,
                 itemBuilder: (context, index) {
                   final comment = comments[index];
+                  final canManage = comment.isOwnedByCurrentUser;
+
                   return Card(
                     margin: const EdgeInsets.only(bottom: 12),
                     child: Padding(
@@ -227,25 +240,28 @@ class _CommentsSectionState extends State<CommentsSection> {
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              PopupMenuButton<String>(
-                                onSelected: (value) {
-                                  if (value == 'edit') {
-                                    _startEdit(comment);
-                                  } else if (value == 'delete') {
-                                    _deleteComment(comment.id);
-                                  }
-                                },
-                                itemBuilder: (BuildContext context) => [
-                                  const PopupMenuItem(
-                                    value: 'edit',
-                                    child: Text('Edit'),
-                                  ),
-                                  const PopupMenuItem(
-                                    value: 'delete',
-                                    child: Text('Delete'),
-                                  ),
-                                ],
-                              ),
+                              // Only the comment's own author sees the
+                              // edit/delete menu.
+                              if (canManage)
+                                PopupMenuButton<String>(
+                                  onSelected: (value) {
+                                    if (value == 'edit') {
+                                      _startEdit(comment);
+                                    } else if (value == 'delete') {
+                                      _deleteComment(comment);
+                                    }
+                                  },
+                                  itemBuilder: (BuildContext context) => [
+                                    const PopupMenuItem(
+                                      value: 'edit',
+                                      child: Text('Edit'),
+                                    ),
+                                    const PopupMenuItem(
+                                      value: 'delete',
+                                      child: Text('Delete'),
+                                    ),
+                                  ],
+                                ),
                             ],
                           ),
                           const SizedBox(height: 8),
